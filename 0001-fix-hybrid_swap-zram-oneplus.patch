@@ -1,0 +1,76 @@
+From: OnePlus Nord CE5 Kernel Workflow <kernel@local>
+Date: 2026-06-08
+Subject: [PATCH] mm/zram: fix broken hybrid_swap (RAM expansion) and zram on OnePlus mt6897 (OOS16)
+
+OnePlus/Oppo ship a proprietary memory-compression stack
+("hybridswap_zram") in the vendor tree
+(vendor/oplus/kernel/mm/hybridswap_zram) which *replaces* the upstream
+GKI zram driver. Its Kconfig declares:
+
+    config HYBRIDSWAP_ZRAM
+        depends on ... && !ZRAM
+
+and the OnePlus GKI common tree consequently:
+  1. comments out the upstream zram build in
+     drivers/block/Makefile  ("# obj-$(CONFIG_ZRAM) += zram/"), and
+  2. ships CONFIG_ZRAM=m in gki_defconfig (so the symbol exists for ABI
+     but produces no usable /dev/zram device).
+
+Community KernelSU/SUSFS builds (e.g. WildKernels) build ONLY the GKI
+Image + modules from this common tree and never compile the vendor
+hybridswap_zram module. Result on-device: no working zram block device
+is registered, so both classic zram swap AND OnePlus "RAM expansion"
+(RSM / hybrid swap, which layers a backing device on top of zram) are
+dead -- mkswap/swapon on /dev/block/zram0 fail because the node never
+appears.
+
+This patch restores a self-contained, working zram by:
+  - re-enabling the in-tree upstream zram driver build, and
+  - building zram + zsmalloc + the compressors statically into the
+    Image (=y) so a GKI-only build still gets /dev/zram0 without
+    depending on the never-built vendor module, and enabling
+    CONFIG_ZRAM_WRITEBACK so a backing device (the RAM-expansion file)
+    can be attached via /sys/block/zram0/backing_dev.
+
+Note: this is the GKI-side fix that makes zram and RAM-expansion work
+on community kernels. It intentionally does NOT try to resurrect the
+proprietary hybridswap container (CONFIG_HYBRIDSWAP*), which needs the
+closed vendor module + userspace; upstream zram + writeback covers the
+swap and RAM-expansion use cases.
+
+---
+--- a/drivers/block/Makefile
++++ b/drivers/block/Makefile
+@@ -32,7 +32,7 @@
+ obj-$(CONFIG_BLK_DEV_RBD)     += rbd.o
+ obj-$(CONFIG_BLK_DEV_PCIESSD_MTIP32XX)	+= mtip32xx/
+ 
+-# obj-$(CONFIG_ZRAM) += zram/
++obj-$(CONFIG_ZRAM) += zram/
+ obj-$(CONFIG_BLK_DEV_RNBD)	+= rnbd/
+ 
+ obj-$(CONFIG_BLK_DEV_NULL_BLK)	+= null_blk/
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -323,7 +323,7 @@
+ # CONFIG_ARM_SCPI_POWER_DOMAIN is not set
+ # CONFIG_EFI_ARMSTUB_DTB_LOADER is not set
+ CONFIG_GNSS=y
+-CONFIG_ZRAM=m
++CONFIG_ZRAM=y
+ CONFIG_BLK_DEV_LOOP=y
+ CONFIG_BLK_DEV_LOOP_MIN_COUNT=16
+ CONFIG_BLK_DEV_RAM=y
+@@ -774,3 +774,12 @@
+ CONFIG_KUNIT_DEBUGFS=y
+ # CONFIG_KUNIT_DEFAULT_ENABLED is not set
+ # CONFIG_RUNTIME_TESTING_MENU is not set
++CONFIG_SWAP=y
++CONFIG_ZSMALLOC=y
++CONFIG_ZSMALLOC_STAT=y
++CONFIG_ZRAM_DEF_COMP_LZORLE=y
++CONFIG_ZRAM_WRITEBACK=y
++CONFIG_CRYPTO_LZO=y
++CONFIG_CRYPTO_LZ4=y
++CONFIG_CRYPTO_LZ4HC=y
++CONFIG_CRYPTO_ZSTD=y
